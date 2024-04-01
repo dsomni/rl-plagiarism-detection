@@ -1,21 +1,40 @@
 import argparse
+import asyncio
 import os
 import warnings
 
+import g4f
+import nest_asyncio
+import numpy as np
 import pandas as pd
-from g4f.client import Client
+
+# from g4f.client import Client
 from torchtext.data.functional import to_map_style_dataset
 from torchtext.datasets import AG_NEWS
 from tqdm import tqdm
 
+nest_asyncio.apply()
+
 ### Constants
+API_ATTEMPTS = 3
+
+DEFAULT_NUM = 2
+RANDOM_STATE = 42
+INITIAL_PERCENT = 0.001
+
+REQUESTS_DELAY = 11
+
 MAX_SYMBOLS = 200
 
 AVAILABLE_MODELS = [
-    # "gpt-3.5-turbo",
+    "openchat_3.5",
     "pi",
+    "mixtral-8x7b",
     # "llama2-70b",
-    # "mixtral-8x7b",
+    # "gpt-3.5-turbo",
+    ## "gpt-3.5-turbo",  # requires google engine
+    ## "mixtral-8x7b",
+    # # "pi", #requires google engine
     # #"airoboros-70b",
 ]
 
@@ -47,8 +66,8 @@ def prompt_1(text: str, history: list) -> str:
     return f"{prefix}Paraphrase and reformulate the following text as much as you can \
         keeping the initial idea. Use synonyms. Return it as one text line. \
         Do not make it longer than initial text. \
-        Write the answer directly, WITHOUT any annotations. \
-        Let it it be ONLY the paraphrased version of text in your answer:\n {text}"
+        Write the answer directly, WITHOUT any annotations, brackets and comments. \
+        Let it it be ONLY the paraphrased text in your answer:\n {text}"
 
 
 def prompt_21(text: str) -> str:
@@ -64,14 +83,30 @@ def prompt_22(text: str) -> str:
 ### Generations
 
 
-def generate_save_type1(dataset: list[str], save_path: str, num: int, desc: str):
-    client = Client()
+async def generate_type1(text: str, model, num: int, loop: tqdm):
+    data_row = {}
 
-    data = []
-    columns = ["initial"]
+    history = []
+    for i in range(num):
+        answer, history = await access_llm(
+            model,
+            prompt_1(text, history),
+            history,
+        )
+        data_row[f"{model}_{i+1}"] = answer
+        await asyncio.sleep(REQUESTS_DELAY)
+        loop.update(1)
+
+    return data_row
+
+
+async def generate_save_type1(dataset: list[str], save_path: str, num: int, desc: str):
+    data = {}
+
+    data["initial"] = []
     for model in AVAILABLE_MODELS:
         for i in range(num):
-            columns.append(f"{model}_{i+1}")
+            data[f"{model}_{i+1}"] = []
 
     loop = tqdm(
         desc=desc,
@@ -79,41 +114,47 @@ def generate_save_type1(dataset: list[str], save_path: str, num: int, desc: str)
         disable=not LOGGER.verbose,
         leave=False,
     )
-    for text in dataset:
-        data_row = [text]
-        for model in AVAILABLE_MODELS:
-            history = []
-            for _ in range(num):
-                answer, history = access_llm(
-                    client,
-                    model,
-                    prompt_1(text, history),
-                    history,
-                )
-                data_row.append(answer)
-                loop.update(1)
-        data.append(data_row)
 
-    pd.DataFrame(data, columns=columns).to_csv(save_path)
+    for i, text in enumerate(dataset):
+        data["initial"].append(text)
+        raw_data = await asyncio.gather(
+            *[generate_type1(text, model, num, loop) for model in AVAILABLE_MODELS]
+        )
+
+        for d in raw_data:
+            for k, v in d.items():
+                data[k].append(v)
+
+        pd.DataFrame(data).to_csv(construct_absolute_path(save_path, f"{i}.csv"))
 
 
 ### Utils
-def access_llm(client, model: str, content: str, history: list) -> tuple[str, list]:
-    try:
-        response = client.chat.completions.create(
-            model=model,
-            messages=[*history, {"role": "user", "content": content}],
-        )
+async def access_llm(model: str, content: str, history: list) -> tuple[str, list]:
+    for i in range(API_ATTEMPTS):
+        try:
+            response = await g4f.ChatCompletion.create_async(
+                model=model,
+                messages=[*history, {"role": "user", "content": content}],
+            )
 
-        return response.choices[0].message.content, [
-            *history,
-            {"role": "user", "content": content},
-            {"role": "assistant", "content": response.choices[0].message.content},
-        ]
-    except:
-        pass
+            return response, [
+                *history,
+                {"role": "user", "content": content},
+                {"role": "assistant", "content": response},
+            ]
+        except Exception:
+            print(model, i)
+            await asyncio.sleep(REQUESTS_DELAY)
+            continue
 
     return "", history
+
+
+def soft_make_dir(path: str):
+    try:
+        os.mkdir(path)
+    except:
+        pass
 
 
 def construct_absolute_path(*relative_path: str) -> str:
@@ -128,7 +169,7 @@ def construct_absolute_path(*relative_path: str) -> str:
     return os.path.abspath(os.path.join(*relative_path))
 
 
-def generate_plagiarism():
+async def generate_plagiarism():
     """Generate plagiarism"""
 
     # Parse arguments
@@ -163,9 +204,9 @@ def generate_plagiarism():
         "--num",
         type=int,
         dest="num",
-        default=2,
+        default=DEFAULT_NUM,
         action=argparse.BooleanOptionalAction,
-        help="number of plagiarized versions for 1 data item (default: 2)",
+        help=f"number of plagiarized versions for 1 data item (default: {DEFAULT_NUM})",
     )
 
     parser.add_argument(
@@ -217,28 +258,43 @@ def generate_plagiarism():
     train_sentences = [x[1] for x in train_dataset]
     test_sentences = [x[1] for x in test_dataset]
 
+    np.random.seed(RANDOM_STATE)
+    np.random.shuffle(train_sentences)
+    np.random.shuffle(test_sentences)
+
+    train_sentences = train_sentences[: int(len(train_sentences) * INITIAL_PERCENT)]
+    test_sentences = test_sentences[: int(len(test_sentences) * INITIAL_PERCENT)]
+
     LOGGER.log(f"{len(train_sentences)=}")
     LOGGER.log(f"{len(test_sentences)=}")
 
     # Generate Type 1 Plagiarism
     if plagiarism <= 1:
-        generate_save_type1(
-            # train_dataset[:2],
-            ["I love chocolate", "Cat eat the mouse"],
-            construct_absolute_path(save_path, "train1.csv"),
+        train1_path = construct_absolute_path(save_path, "train1")
+        soft_make_dir(train1_path)
+        await generate_save_type1(
+            train_sentences,
+            # ["I love chocolate", "Cat eat the mouse", "Elephant is so big in the zoo"],
+            train1_path,
             num,
             "Generating Type 1 for train data",
         )
         LOGGER.log("Finish generation Type 1 for train data!")
 
-        # LOGGER.log("Generating Type 1 for test data...")
-        # generate_save_type1(
-        #     test_dataset, construct_absolute_path(save_path, "test1.csv"), num
-        # )
+        test1_path = construct_absolute_path(save_path, "test1")
+        soft_make_dir(test1_path)
+        await generate_save_type1(
+            test_sentences,
+            # ["I love chocolate", "Cat eat the mouse", "Elephant is so big in the zoo"],
+            test1_path,
+            num,
+            "Generating Type 1 for test data",
+        )
+
         # LOGGER.log("Finish generation Type 1 for test data!")
 
     LOGGER.log("Done!")
 
 
 if __name__ == "__main__":
-    generate_plagiarism()
+    asyncio.run(generate_plagiarism())
