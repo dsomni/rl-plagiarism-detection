@@ -2,3 +2,7 @@ data/
 
 generated/train1/
 generated/test1/
+generated/train2/
+generated/test2/
+
+run_plagiarism_generation.bat
