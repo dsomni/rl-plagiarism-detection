@@ -10,8 +10,6 @@ import g4f
 import nest_asyncio
 import numpy as np
 import pandas as pd
-
-# from g4f.client import Client
 from torchtext.data.functional import to_map_style_dataset
 from torchtext.datasets import AG_NEWS
 from tqdm import tqdm
@@ -67,6 +65,7 @@ LOGGER = Logger()
 
 ### Prompts
 def prompt_1(text: str, history: list = []) -> str:
+    """Generate prompt for the Type 1 plagiarism"""
     prefix = "One more time but in different way " if len(history) != 0 else ""
     return f"{prefix}Paraphrase and reformulate the following text as much as you can \
         keeping the initial idea. Use synonyms. Return it as one text line. \
@@ -76,21 +75,23 @@ def prompt_1(text: str, history: list = []) -> str:
 
 
 def prompt_21(text: str, history: list = []) -> str:
+    """Generate idea prompt for the Type 2 plagiarism"""
+
     prefix = "One more time but in different way " if len(history) != 0 else ""
     return f"{prefix}Write directly in several words the main topic \
         of the following text, without details: \n {text}"
 
 
 def prompt_22(text: str, history: list = []) -> str:
+    """Generate prompt for the Type 2 plagiarism"""
     prefix = "One more time but in different way " if len(history) != 0 else ""
     return f"{prefix}Write a short sentence (no more than {MAX_SYMBOLS} symbols) \
         on the following topic: \n {text}"
 
 
 ### Generations
-
-
 async def generate_type1(text: str, model, num: int, loop: Optional[tqdm] = None):
+    """Generate Type 1 plagiarism"""
     data_row = {}
 
     history = []
@@ -108,6 +109,8 @@ async def generate_type1(text: str, model, num: int, loop: Optional[tqdm] = None
 
 
 async def generate_save_type1(dataset: list[str], save_path: str, num: int, desc: str):
+    """Generate and save Type 1 plagiarism entities"""
+
     data = {}
 
     data["initial"] = []
@@ -136,6 +139,8 @@ async def generate_save_type1(dataset: list[str], save_path: str, num: int, desc
 
 
 async def generate_type2(idea: str, model, num: int, loop: Optional[tqdm] = None):
+    """Generate Type 2 plagiarism"""
+
     data_row = {}
 
     history = []
@@ -153,6 +158,8 @@ async def generate_type2(idea: str, model, num: int, loop: Optional[tqdm] = None
 
 
 async def generate_save_type2(dataset: list[str], save_path: str, num: int, desc: str):
+    """Generate and save Type 2 plagiarism entities"""
+
     data = {}
 
     data["initial"] = []
@@ -204,6 +211,7 @@ async def generate_save_type2(dataset: list[str], save_path: str, num: int, desc
 
 ### Utils
 async def access_llm(model: str, content: str, history: list = []) -> tuple[str, list]:
+    """Access LLM api"""
     if model in SKIPPED_MODELS:
         return "", history
 
@@ -212,7 +220,7 @@ async def access_llm(model: str, content: str, history: list = []) -> tuple[str,
             response = await g4f.ChatCompletion.create_async(
                 model=model,
                 messages=[*history, {"role": "user", "content": content}],
-            )
+            )  # type: ignore
 
             await asyncio.sleep(REQUESTS_DELAY)
 
@@ -231,6 +239,8 @@ async def access_llm(model: str, content: str, history: list = []) -> tuple[str,
 
 
 async def fill_gaps_1(file_path: str, num: int, exit_on_fail: bool = True):
+    """Fill gaps in Type 1 plagiarism final table"""
+
     def get_model(column: str) -> str:
         return "_".join(list(column.split("_"))[:-1])
 
@@ -272,6 +282,8 @@ async def fill_gaps_1(file_path: str, num: int, exit_on_fail: bool = True):
 async def fill_gaps_2(
     file_path: str, ideas_path: str, num: int, exit_on_fail: bool = True
 ):
+    """Fill gaps in Type 2 plagiarism final table"""
+
     def get_model(column: str) -> str:
         return "_".join(list(column.split("_"))[:-1])
 
@@ -314,6 +326,7 @@ async def fill_gaps_2(
 
 
 def get_max_index(path: str) -> int:
+    """Get the last file with generated plagiarisms"""
     max_index = -1
     for file in os.listdir(path):
         with contextlib.suppress(ValueError):
@@ -322,6 +335,7 @@ def get_max_index(path: str) -> int:
 
 
 def soft_make_dir(path: str):
+    """Softly make directory"""
     with contextlib.suppress(Exception):
         os.mkdir(path)
 
@@ -339,10 +353,12 @@ def construct_absolute_path(*relative_path: str) -> str:
 
 
 def save_df(df: pd.DataFrame, path: str):
+    """Process and save pandas Data frame"""
     df.loc[:, ~df.columns.str.contains("^Unnamed")].to_csv(path, index=False)
 
 
 def prepare_sentences(sentences: list[str]) -> list[str]:
+    """Permute and cut sentences"""
     permuted = list(np.random.permutation(sentences))
     return permuted[: int(len(permuted) * INITIAL_PERCENT)]
 
