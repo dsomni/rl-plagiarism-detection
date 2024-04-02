@@ -4,6 +4,7 @@ import contextlib
 import os
 import sys
 import warnings
+from datetime import datetime
 from typing import Optional
 
 import g4f
@@ -26,6 +27,8 @@ INITIAL_PERCENT = 0.001
 REQUESTS_DELAY = 11
 
 MAX_SYMBOLS = 150
+
+HISTORY_PREFIX = "One more time but in different way "
 
 AVAILABLE_MODELS = [
     "openchat_3.5",
@@ -66,7 +69,7 @@ LOGGER = Logger()
 ### Prompts
 def prompt_1(text: str, history: list = []) -> str:
     """Generate prompt for the Type 1 plagiarism"""
-    prefix = "One more time but in different way " if len(history) != 0 else ""
+    prefix = HISTORY_PREFIX if len(history) != 0 else ""
     return f"{prefix}Paraphrase and reformulate the following text as much as you can \
         keeping the initial idea. Use synonyms. Return it as one text line. \
         Do not make it longer than initial text. \
@@ -77,14 +80,14 @@ def prompt_1(text: str, history: list = []) -> str:
 def prompt_21(text: str, history: list = []) -> str:
     """Generate idea prompt for the Type 2 plagiarism"""
 
-    prefix = "One more time but in different way " if len(history) != 0 else ""
+    prefix = HISTORY_PREFIX if len(history) != 0 else ""
     return f"{prefix}Write directly in several words the main topic \
         of the following text, without details: \n {text}"
 
 
 def prompt_22(text: str, history: list = []) -> str:
     """Generate prompt for the Type 2 plagiarism"""
-    prefix = "One more time but in different way " if len(history) != 0 else ""
+    prefix = HISTORY_PREFIX if len(history) != 0 else ""
     return f"{prefix}Write a short sentence (no more than {MAX_SYMBOLS} symbols) \
         on the following topic: \n {text}"
 
@@ -334,6 +337,12 @@ def get_max_index(path: str) -> int:
     return max_index
 
 
+def read_custom(path: str) -> list[str]:
+    """Read custom data"""
+    with open(path, "r", encoding="utf-8") as f:
+        return f.readlines()
+
+
 def soft_make_dir(path: str):
     """Softly make directory"""
     with contextlib.suppress(Exception):
@@ -357,9 +366,11 @@ def save_df(df: pd.DataFrame, path: str):
     df.loc[:, ~df.columns.str.contains("^Unnamed")].to_csv(path, index=False)
 
 
-def prepare_sentences(sentences: list[str]) -> list[str]:
+def prepare_sentences(sentences: list[str], truncate: bool = True) -> list[str]:
     """Permute and cut sentences"""
     permuted = list(np.random.permutation(sentences))
+    if not truncate:
+        return permuted
     return permuted[: int(len(permuted) * INITIAL_PERCENT)]
 
 
@@ -406,8 +417,17 @@ async def generate_plagiarism():
         type=int,
         dest="num",
         default=DEFAULT_NUM,
-        action=argparse.BooleanOptionalAction,
         help=f"number of plagiarized versions for 1 data item (default: {DEFAULT_NUM})",
+    )
+
+    parser.add_argument(
+        "-c",
+        "--custom",
+        type=str,
+        dest="custom_path",
+        default=None,
+        help="relative path to custom data file (default: None).\
+              It should be .txt file with one row - one piece content",
     )
 
     parser.add_argument(
@@ -432,6 +452,7 @@ async def generate_plagiarism():
         save_path,
         data_load_path,
         num,
+        custom_path,
         ignore_warnings,
         verbose,
     ) = (
@@ -440,6 +461,7 @@ async def generate_plagiarism():
         namespace.save_path,
         namespace.data_load_path,
         namespace.num,
+        namespace.custom_path,
         namespace.ignore_warnings,
         namespace.verbose,
     )
@@ -451,18 +473,6 @@ async def generate_plagiarism():
 
     # Set up logger
     LOGGER.verbose = verbose
-
-    # Load datasets
-    load_path = construct_absolute_path(data_load_path)
-
-    train_dataset = to_map_style_dataset(AG_NEWS(root=load_path, split="train"))
-    test_dataset = to_map_style_dataset(AG_NEWS(root=load_path, split="test"))
-
-    train_sentences = [x[1] for x in train_dataset]
-    test_sentences = [x[1] for x in test_dataset]
-
-    LOGGER.log(f"Train size = {int(len(train_sentences) * INITIAL_PERCENT)}")
-    LOGGER.log(f"Test size = {int(len(test_sentences) * INITIAL_PERCENT)}\n")
 
     # Fixing
     if fixing:
@@ -494,57 +504,67 @@ async def generate_plagiarism():
 
         return
 
+    # Load datasets
+    if custom_path is not None:
+        data = [
+            (
+                read_custom(construct_absolute_path(custom_path)),
+                f"custom_{datetime.strftime(datetime.now(), '%d%m%y_%H%M%S')}",
+                "custom",
+            )
+        ]
+        truncate = False
+
+    else:
+        load_path = construct_absolute_path(data_load_path)
+        train_dataset = to_map_style_dataset(AG_NEWS(root=load_path, split="train"))
+        test_dataset = to_map_style_dataset(AG_NEWS(root=load_path, split="test"))
+
+        train_sentences = [x[1] for x in train_dataset]
+        test_sentences = [x[1] for x in test_dataset]
+
+        data = [
+            (train_sentences, "train", "train"),
+            (test_sentences, "test", "test"),
+        ]
+        truncate = True
+
+    for sentences, filename, log_name in data:
+        LOGGER.log(f"{log_name} size = {int(len(sentences) * INITIAL_PERCENT)}")
+
     # Generate Type 1 Plagiarism
     if plagiarism <= 1:
-        np.random.seed(RANDOM_STATE)
-        train_sentences1 = prepare_sentences(train_sentences)
-        test_sentences1 = prepare_sentences(test_sentences)
+        for sentences, filename, log_name in data:
+            np.random.seed(RANDOM_STATE)
 
-        train1_path = construct_absolute_path(save_path, "train1")
-        soft_make_dir(train1_path)
-        await generate_save_type1(
-            train_sentences1,
-            train1_path,
-            num,
-            "Generating Type 1 for train data",
-        )
-        LOGGER.log("Finish generation Type 1 for train data!")
+            prepared_sentences = prepare_sentences(sentences, truncate)
+            full_save_path = construct_absolute_path(save_path, f"{filename}1")
+            soft_make_dir(full_save_path)
 
-        test1_path = construct_absolute_path(save_path, "test1")
-        soft_make_dir(test1_path)
-        await generate_save_type1(
-            test_sentences1,
-            test1_path,
-            num,
-            "Generating Type 1 for test data",
-        )
-        LOGGER.log("Finish generation Type 1 for test data!")
+            await generate_save_type1(
+                prepared_sentences,
+                full_save_path,
+                num,
+                f"Generating Type 1 for '{log_name}'",
+            )
+            LOGGER.log(f"Finish generation Type 1 for '{log_name}'!")
 
     # Generate Type 2 Plagiarism
     if plagiarism == 0 or plagiarism == 2:
-        np.random.seed(RANDOM_STATE * 2)
-        train_sentences2 = prepare_sentences(train_sentences)
-        test_sentences2 = prepare_sentences(test_sentences)
+        for sentences, filename, log_name in data:
+            np.random.seed(RANDOM_STATE * 2)
 
-        train2_path = construct_absolute_path(save_path, "train2")
-        soft_make_dir(train2_path)
-        await generate_save_type2(
-            train_sentences2,
-            train2_path,
-            num,
-            "Generating Type 2 for train data",
-        )
-        LOGGER.log("Finish generation Type 2 for train data!")
+            prepared_sentences = prepare_sentences(sentences, truncate)
+            full_save_path = construct_absolute_path(save_path, f"{filename}2")
+            soft_make_dir(full_save_path)
 
-        test2_path = construct_absolute_path(save_path, "test2")
-        soft_make_dir(test2_path)
-        await generate_save_type2(
-            test_sentences2,
-            test2_path,
-            num,
-            "Generating Type 2 for test data",
-        )
-        LOGGER.log("Finish generation Type 2 for test data!")
+            await generate_save_type2(
+                prepared_sentences,
+                full_save_path,
+                num,
+                f"Generating Type 2 for '{log_name}'",
+            )
+            LOGGER.log(f"Finish generation Type 2 for '{log_name}'!")
 
     LOGGER.log("Done!")
 
