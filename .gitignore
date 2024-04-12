@@ -5,4 +5,6 @@ generated/test1/
 generated/train2/
 generated/test2/
 
+logs/
+
 run_plagiarism_generation.bat
